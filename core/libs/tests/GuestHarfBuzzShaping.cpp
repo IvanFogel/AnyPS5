@@ -198,7 +198,7 @@ static void CheckScripts(const Api& api, hb_face_t* face) {
         const auto total = hb_ot_layout_table_get_script_tags(face, tag, 0, nullptr, nullptr);
         Require(api.scripts(face, tag, 0, nullptr, nullptr) == total);
         for (unsigned start : {0u, 1u, total, total + 1, std::numeric_limits<unsigned>::max()}) {
-            for (unsigned capacity : {0u, 1u, 3u, 32u}) {
+            for (unsigned capacity : {0u, 1u, 3u, 32u, std::numeric_limits<unsigned>::max()}) {
                 std::array<std::uint32_t, 34> actual, expected;
                 actual.fill(0xDEADBEEFu);
                 expected = actual;
@@ -216,13 +216,15 @@ static void CheckScripts(const Api& api, hb_face_t* face) {
 }
 
 static void CheckLanguages(const Api& api, hb_face_t* face) {
+    bool foundLanguage = false;
     for (auto tag : {HB_OT_TAG_GSUB, HB_OT_TAG_GPOS, HB_TAG('n', 'o', 'n', 'e')}) {
         const auto scripts = hb_ot_layout_table_get_script_tags(face, tag, 0, nullptr, nullptr);
         for (unsigned script = 0; script <= scripts + 1; ++script) {
             const auto total = hb_ot_layout_script_get_language_tags(face, tag, script, 0, nullptr, nullptr);
+            foundLanguage = foundLanguage || total != 0;
             Require(api.languages(face, tag, script, 0, nullptr, nullptr) == total);
             for (unsigned start : {0u, 1u, total, std::numeric_limits<unsigned>::max()}) {
-                for (unsigned capacity : {0u, 1u, 3u, 32u}) {
+                for (unsigned capacity : {0u, 1u, 3u, 32u, std::numeric_limits<unsigned>::max()}) {
                     std::array<std::uint32_t, 34> actual, expected;
                     actual.fill(0xCAFEBABEu);
                     expected = actual;
@@ -234,6 +236,7 @@ static void CheckLanguages(const Api& api, hb_face_t* face) {
             }
         }
     }
+    Require(foundLanguage);
 }
 
 static void CheckFeatures(const Api& api, hb_face_t* face) {
@@ -298,6 +301,10 @@ static std::int32_t APS5_VABI Advance(hb_font_t*, void* data, std::uint32_t glyp
     return 100 + static_cast<std::int32_t>(glyph);
 }
 
+static hb_blob_t* APS5_VABI EmptyTable(hb_face_t*, std::uint32_t, void*) {
+    return hb_blob_get_empty();
+}
+
 static void CheckShaping(const Api& api, const std::filesystem::path& root) {
     auto* emptyFont = hb_font_create(nullptr);
     auto* emptyBuffer = hb_buffer_create();
@@ -336,7 +343,7 @@ static void CheckShaping(const Api& api, const std::filesystem::path& root) {
         api.destroyFont(font);
         Require(tables.destroyed == 1 && tables.created == tables.released);
     }
-    auto* face = api.face(nullptr, nullptr, nullptr);
+    auto* face = api.face(EmptyTable, nullptr, nullptr);
     auto* font = api.font(face);
     api.destroyFace(face);
     auto* functions = api.functions();
@@ -344,6 +351,8 @@ static void CheckShaping(const Api& api, const std::filesystem::path& root) {
     api.nominal(functions, Nominal, &calls, nullptr);
     api.advance(functions, Advance, &calls, nullptr);
     api.setFunctions(font, functions, &calls, nullptr);
+    std::uint32_t probeGlyph = 0;
+    Require(hb_font_get_nominal_glyph(font, 'A', &probeGlyph) && probeGlyph == 'A' + 1);
     hb_font_funcs_destroy(functions);
     auto* buffer = api.buffer();
     const std::uint16_t text[]{'A', 'B'};
@@ -353,6 +362,7 @@ static void CheckShaping(const Api& api, const std::filesystem::path& root) {
     unsigned count = 0;
     const auto* infos = api.infos(buffer, &count);
     const auto* positions = api.positions(buffer, nullptr);
+    if (count != 2 || calls < 4) std::fprintf(stderr, "Custom font: %u glyphs, %u callbacks\n", count, calls);
     Require(count == 2 && calls >= 4);
     Require(infos[0].codepoint == 'A' + 1 && infos[1].codepoint == 'B' + 1);
     Require(positions[0].x_advance == 'A' + 101 && positions[1].x_advance == 'B' + 101);
