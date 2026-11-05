@@ -2,12 +2,14 @@
 #include "prx/libSceAgcDriver/Execution/include/ThreadPriority.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/FrameRecorder.hpp"
+#include "prx/libSceAgcDriver/Execution/include/NativeDepthCapture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Screenshot.hpp"
 #include "prx/libkernel/Time/include/SleepWake.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <mutex>
+#include <stdexcept>
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 
 namespace AgcDriver {
@@ -121,6 +123,13 @@ extern "C" void AgcDriverShutdown_nid_postfix() {
 
 extern "C" void AgcDriverRequestScreenshot_nid_postfix() {
     AgcDriver::Screenshot::Request();
+}
+
+extern "C" std::size_t AgcDriverRestoreNativeDepthCapture_nid_no_patch(const char* directory) {
+    if (directory == nullptr) throw std::invalid_argument("native depth capture: null capture directory");
+    const auto snapshots = AgcDriver::ReadNativeDepthCapture(std::filesystem::path(directory) / AgcDriver::NativeDepthCaptureName);
+    if (!snapshots.empty()) AgcDriver::DriverDetail::Driver::Get().RestoreNativeDepth(snapshots);
+    return snapshots.size();
 }
 
 extern "C" void AgcDriverRegisterShader_nid_postfix(const Shader* shader) try {

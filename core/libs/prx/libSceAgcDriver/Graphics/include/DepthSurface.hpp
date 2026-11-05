@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+namespace AgcDriver { struct NativeDepthSnapshot; }
+
 namespace AgcDriver::Graphics {
 
 class Texture;
@@ -49,6 +51,8 @@ bool HasResidentDepthGuards_nid_no_patch();
 void RetireUnmappedDepth_nid_no_patch(std::uintptr_t address, std::size_t bytes);
 void RequireNoNativeDepthFeedback_nid_no_patch(const Context& context, const DepthTarget& target, std::span<const std::shared_ptr<Texture>> sampled);
 void ClearDepthSurfaces(VkDevice device);
+std::vector<NativeDepthSnapshot> CaptureNativeDepthSurfaces(VkDevice device);
+void RestoreNativeDepthSurfaces(const Context& context, std::span<const NativeDepthSnapshot> snapshots);
 void RetireDepthSurfaces(VkDevice device, std::uint64_t address, std::uint64_t bytes);
 struct WrittenStorageExtent {
     std::uint64_t address;
