@@ -3,10 +3,6 @@
 
 extern "C" {
 
-int APS5_VABI hb_ft_face_create_cached_nid_postfix() {
-    NotImplemented_nid_no_patch(__func__);
-}
-
 int APS5_VABI hb_icu_script_to_script_nid_postfix() {
     NotImplemented_nid_no_patch(__func__);
 }

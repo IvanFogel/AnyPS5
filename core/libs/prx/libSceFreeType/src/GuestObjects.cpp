@@ -1,4 +1,5 @@
 #include "prx/libSceFreeType/include/GuestObjects.hpp"
+#include "prx/libSceFreeType/include/NativeFace.hpp"
 
 #include <cstddef>
 #include <stdexcept>
@@ -128,4 +129,9 @@ void SyncSlot(GuestFace& face) {
     slot.other = host->other;
 }
 
+}
+
+extern "C" void* FreeTypeBorrowFace_nid_no_patch(const FreeType::GuestFaceRec* face) {
+    const auto* owner = FreeType::FaceOf(face);
+    return owner ? owner->host : nullptr;
 }
