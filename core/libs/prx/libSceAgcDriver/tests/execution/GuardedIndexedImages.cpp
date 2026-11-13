@@ -74,7 +74,7 @@ constexpr std::array<std::uint32_t, 20> BufferSamplerWebCode{
 constexpr auto BufferSamplerNoExecWebCode = [] {
     std::array<std::uint32_t, 21> code{};
     std::copy_n(BufferSamplerWebCode.begin(), 14u, code.begin());
-    code[14] = 0xbefe0380u;
+    code[14] = 0xbefe0480u;
     std::copy(BufferSamplerWebCode.begin() + 14, BufferSamplerWebCode.end(), code.begin() + 15);
     return code;
 }();
@@ -314,8 +314,20 @@ void RunBufferSampler(AgcDriver::VulkanDevice& device, GuestBlock& guest, std::u
         failure = error.what();
     }
     const auto log = captureLog.Finish() + failure;
-    Require(log.find("write-back failed") == std::string::npos, "buffer sampler: guest write-back failed: " + log);
-    if (!noExec && selector != 0u) {
+    const bool descriptorFault = !noExec && selector != 0u;
+    constexpr std::string_view expectedFault = "BDA access failed: address=0x0 instruction=0x38 bytes=0 stage=4 reason=8";
+    std::string_view remaining(log);
+    while (!remaining.empty()) {
+        const auto end = remaining.find('\n');
+        const auto line = remaining.substr(0u, end);
+        if (line.find("BDA access failed") != std::string_view::npos || line.find("write-back failed") != std::string_view::npos) {
+            Require(descriptorFault && line.find(expectedFault) != std::string_view::npos,
+                    "buffer sampler: an unexpected descriptor or write-back fault was reported: " + log);
+        }
+        if (end == std::string_view::npos) break;
+        remaining.remove_prefix(end + 1u);
+    }
+    if (descriptorFault) {
         Require(log.find("BDA access failed") != std::string::npos && log.find("reason=8") != std::string::npos &&
                 log.find("address=0x0 instruction=0x38 bytes=0") != std::string::npos,
                 "buffer sampler: an executed unreconstructible arm did not report InvalidDescriptor at the sample: " + log);
