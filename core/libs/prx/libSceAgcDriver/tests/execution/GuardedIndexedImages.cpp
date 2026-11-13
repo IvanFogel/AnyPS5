@@ -65,6 +65,24 @@ constexpr auto UnderflowCode = [] {
     return code;
 }();
 
+constexpr std::array<std::uint32_t, 20> BufferSamplerWebCode{
+    0xf4000400u, 0xfa000050u, 0xf4080500u, 0xfa000020u, 0xf4080600u,
+    0xfa000040u, 0xf40c0200u, 0xfa000000u, 0xbf8cc07fu, 0xbf068010u,
+    0xbf850003u, 0xf420050cu, 0x20000000u, 0xbf8cc07fu, 0xf09c0f08u,
+    0x00a20000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u};
+
+constexpr auto BufferSamplerNoExecWebCode = [] {
+    std::array<std::uint32_t, 21> code{};
+    std::copy_n(BufferSamplerWebCode.begin(), 14u, code.begin());
+    code[14] = 0xbefe0380u;
+    std::copy(BufferSamplerWebCode.begin() + 14, BufferSamplerWebCode.end(), code.begin() + 15);
+    return code;
+}();
+
+static_assert(10u + 1u + (BufferSamplerWebCode[10] & 0xffffu) == 14u);
+static_assert(BufferSamplerWebCode[0x38u / 4u] == 0xf09c0f08u);
+static_assert(BufferSamplerNoExecWebCode[0x3cu / 4u] == 0xf09c0f08u);
+
 enum class Boundary { None, Above, Below };
 
 class GuestBlock {
@@ -253,15 +271,84 @@ void Run(AgcDriver::VulkanDevice& device, GuestBlock& guest, bool fragment, std:
     }
 }
 
+void RunBufferSampler(AgcDriver::VulkanDevice& device, GuestBlock& guest, std::uint32_t wave, std::uint32_t selector, bool noExec) {
+    const std::array<unsigned, 3> blocks{0u, 1u, 3u};
+    for (const auto block : blocks) std::fill_n(guest.Words(block * BlockBytes), BlockBytes / 4u, Guard);
+    std::fill_n(guest.Words(), 32u, 0u);
+    std::memset(guest.Words(FirstTexels), 0xff, 256u);
+    const auto texture = guest.Address(FirstTexels);
+    const std::array<std::uint32_t, 8> image{
+        static_cast<std::uint32_t>(texture >> 8u), static_cast<std::uint32_t>((texture >> 40u) & 0xffu) | (56u << 20u) | (3u << 30u),
+        3u << 14u, 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u};
+    std::copy(image.begin(), image.end(), guest.Words());
+    const auto output = guest.Address(OutputOffset);
+    const std::array<std::uint32_t, 4> buffer{
+        static_cast<std::uint32_t>(output), static_cast<std::uint32_t>((output >> 32u) & 0xffffu), 16u, 0x30027facu};
+    std::copy(buffer.begin(), buffer.end(), guest.Words() + 16u);
+    guest.Words()[20] = selector;
+    guest.Words(OutputOffset)[0] = 0u;
+    std::array<std::vector<std::uint32_t>, 3> expected;
+    for (std::size_t i = 0; i < blocks.size(); ++i) expected[i].assign(guest.Words(blocks[i] * BlockBytes), guest.Words((blocks[i] + 1u) * BlockBytes));
+    const auto root = guest.Address();
+    const std::array<std::uint32_t, 2> user{static_cast<std::uint32_t>(root), static_cast<std::uint32_t>(root >> 32u)};
+    const auto code = noExec ? std::span<const std::uint32_t>(BufferSamplerNoExecWebCode) : std::span<const std::uint32_t>(BufferSamplerWebCode);
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{wave, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0u, {}},
+        {wave, 0u, user, compute, std::nullopt, std::nullopt, {}}, device.ComputeTarget(32), {0u, 0u, 0u, 128u}};
+    request.useCache = false;
+    AgcDriver::ShaderMemory memory({});
+    const auto capture = memory.Capture(request);
+    if (!noExec) Require(capture->plan->info.usesFaultBuffer, "buffer sampler: an unreconstructible arm has no fault buffer");
+    Require(capture->snapshot.srtPoison.empty(), "buffer sampler: valid mapped data acquired an inaccessible SRT address");
+    const auto regions = memory.Regions();
+    request.context.memory = regions;
+    const auto compiled = ShaderRecompiler::Recompile(request, *capture);
+    if (!noExec) Require(compiled->descriptorFaults != 0u, "buffer sampler: the unreconstructible arm lost its descriptor fault");
+    StderrCapture captureLog;
+    std::string failure;
+    try {
+        device.Dispatch(*compiled, 1u, 1u, 1u, {}, request.shader.codeAddress);
+        device.WaitIdle();
+    } catch (const std::runtime_error& error) {
+        failure = error.what();
+    }
+    const auto log = captureLog.Finish() + failure;
+    Require(log.find("write-back failed") == std::string::npos, "buffer sampler: guest write-back failed: " + log);
+    if (!noExec && selector != 0u) {
+        Require(log.find("BDA access failed") != std::string::npos && log.find("reason=8") != std::string::npos &&
+                log.find("address=0x0 instruction=0x38 bytes=0") != std::string::npos,
+                "buffer sampler: an executed unreconstructible arm did not report InvalidDescriptor at the sample: " + log);
+    } else {
+        Require(failure.empty() && log.find("BDA access failed") == std::string::npos,
+                "buffer sampler: a supported or inactive arm faulted: " + log);
+    }
+    if (!noExec) expected[0][OutputOffset / 4u] = 0x3f800000u;
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        for (std::size_t at = 0; at < expected[i].size(); ++at) {
+            Require(guest.Words(blocks[i] * BlockBytes)[at] == expected[i][at],
+                    "buffer sampler: unexpected sampled output or guest guard bytes at " + std::to_string(blocks[i] * BlockBytes + at * 4u));
+        }
+    }
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         const std::string_view mode = argc > 1 ? argv[1] : "";
-        Require(argc <= 2 && (mode.empty() || mode == "--fragment" || mode == "--fault32" || mode == "--fault64" || mode == "--wrap" || mode == "--faultwrap32" || mode == "--faultwrap64"), "indexed images: unknown arguments");
+        Require(argc <= 2 && (mode.empty() || mode == "--fragment" || mode == "--fault32" || mode == "--fault64" || mode == "--wrap" || mode == "--faultwrap32" || mode == "--faultwrap64" || mode == "--buffer_sampler32" || mode == "--buffer_sampler64" || mode == "--buffer_sampler_exec032" || mode == "--buffer_sampler_exec064"), "indexed images: unknown arguments");
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         GuestBlock guest;
+        if (mode.starts_with("--buffer_sampler")) {
+            const auto wave = mode.ends_with("64") ? 64u : 32u;
+            const bool noExec = mode.find("exec0") != std::string_view::npos;
+            if (!noExec) RunBufferSampler(*device, guest, wave, 0u, false);
+            RunBufferSampler(*device, guest, wave, 4u, noExec);
+            std::puts(noExec ? "buffer-derived sampler: inactive arm preserves guest bytes without a fault" : "buffer-derived sampler: supported and folded arms preserve their sampled output and fault contract");
+            return 0;
+        }
         if (mode == "--fault32" || mode == "--fault64") {
             Run(*device, guest, false, mode == "--fault32" ? 32u : 64u, 1u, 1024u, false, true);
             std::puts("indexed texture descriptor: executed inaccessible read preserves fault address and PC");
