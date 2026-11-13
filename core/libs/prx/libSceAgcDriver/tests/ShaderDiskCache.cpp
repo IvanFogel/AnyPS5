@@ -1943,6 +1943,7 @@ std::vector<PlanFixture> planFixtures() {
     place(palette, 0x18u, imageWords(PlanTextureAddress + 0x100u));
     add("pointer image table", 64, {0xf4080200u, 0xfa000000u, 0xf4080700u, 0xfa000010u, 0xf4080800u, 0xfa000020u, 0x7e200500u, 0x8f108210u, 0xf4200444u, 0x20000000u, 0x8711ff11u, 0x000000ffu, 0x8f128511u, 0xf40c0900u, 0x24000040u, 0xf09c0f08u, 0x01090000u, 0xe0700000u, 0x80070000u, 0xbf810000u}, srtPointer, {{PlanSrtAddress, palette}, {PlanMaterialAddress, {0u, 1u, 0u, 1u, 0u, 0u, 0u, 0u}}});
 
+    add("descriptor phi deferred sampler", 32, {0xf4000400u, 0xfa000050u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xf40c0200u, 0xfa000000u, 0xbf8cc07fu, 0xbf068010u, 0xbf850003u, 0xf420050cu, 0x20000000u, 0xbf8cc07fu, 0xf09c0f08u, 0x00a20000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u}, srtPointer, {{PlanSrtAddress, guarded}});
     std::vector<std::uint32_t> nestedSrt(16u, 0u);
     place(nestedSrt, 0u, bufferWords(PlanTableAddress, 16u, 4u));
     place(nestedSrt, 4u, bufferWords(PlanMaterialAddress, 0u, 32u));
@@ -2731,15 +2732,17 @@ void verifyPlanAcrossProcesses(const char* self) {
     for (std::size_t index = 0; index < outputs.size(); ++index) require(WriteFileAtomically(planOutputPath(index), outputs[index]), "cannot write the first process's output");
     auto refused = fixtures[1];
     refused.codeAddress = 0x200000u;
-    refused.code = {0xbf827fffu, 0xbf810000u};
-    bool threw = false;
-    try {
-        static_cast<void>(PrepareShader(refused.Request(true)));
-    } catch (const std::runtime_error&) {
-        threw = true;
+    for (const auto& refusedCode : {std::vector<std::uint32_t>{0xbf827fffu, 0xbf810000u}, std::vector<std::uint32_t>{0xf40c0200u}}) {
+        refused.code = refusedCode;
+        bool threw = false;
+        try {
+            static_cast<void>(PrepareShader(refused.Request(true)));
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        ShaderDiskCache::Flush();
+        require(threw && ShaderDiskCache::Totals().planWrites == after.planWrites && !std::filesystem::exists(planEntryPath(refused)), "a plan the front end refused was stored");
     }
-    ShaderDiskCache::Flush();
-    require(threw && ShaderDiskCache::Totals().planWrites == after.planWrites && !std::filesystem::exists(planEntryPath(refused)), "a plan the front end refused was stored");
     std::uintmax_t planBytes = 0;
     for (auto& fixture : fixtures) planBytes += std::filesystem::file_size(planEntryPath(fixture));
     std::cout << fixtures.size() << " plan entries, " << planBytes / fixtures.size() << " bytes per entry on average\n";
