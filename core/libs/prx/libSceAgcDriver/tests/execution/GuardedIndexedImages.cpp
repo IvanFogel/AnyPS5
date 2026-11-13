@@ -316,6 +316,8 @@ void RunBufferSampler(AgcDriver::VulkanDevice& device, GuestBlock& guest, std::u
     const auto log = captureLog.Finish() + failure;
     const bool descriptorFault = !noExec && selector != 0u;
     constexpr std::string_view expectedFault = "BDA access failed: address=0x0 instruction=0x38 bytes=0 stage=4 reason=8";
+    Require(failure.empty() || (descriptorFault && (failure == expectedFault || failure == "AGC graphics: " + std::string(expectedFault))),
+            "buffer sampler: an unexpected dispatch exception was caught: " + failure);
     std::string_view remaining(log);
     while (!remaining.empty()) {
         const auto end = remaining.find('\n');
